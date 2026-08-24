@@ -19,6 +19,7 @@ mise_history="$test_tmp/mise-history"
 stub_log="$test_tmp/stubs"
 terminal_log="$test_tmp/terminal"
 menu_log="$test_tmp/menu"
+curl_log="$test_tmp/curl"
 mkdir -p "$mock_bin" "$test_home"
 
 cat >"$mock_bin/omarchy-notification-send" <<'SH'
@@ -69,6 +70,21 @@ cat >"$mock_bin/omarchy-menu" <<'SH'
 printf '%s\0' "$@" >"$OMARCHY_TEST_AGENT_MENU_LOG"
 SH
 
+# prime-agent installs through its own curl bootstrap rather than mise, so its
+# installer is exercised through this mock instead of the mise one above.
+# What curl "downloads" here is a tiny inline script controlling success or
+# failure, the same way the real installer's exit status flows through the
+# pipe into sh.
+cat >"$mock_bin/curl" <<'SH'
+#!/bin/bash
+printf '%s\0' "$@" >>"$OMARCHY_TEST_CURL_LOG"
+if [[ ${OMARCHY_TEST_CURL_FAIL:-false} == "true" ]]; then
+  printf 'exit 1\n'
+else
+  printf 'exit 0\n'
+fi
+SH
+
 cat >"$mock_bin/omarchy-test-noop" <<'SH'
 #!/bin/bash
 exit 0
@@ -91,6 +107,7 @@ export OMARCHY_TEST_MISE_HISTORY="$mise_history"
 export OMARCHY_TEST_STUB_LOG="$stub_log"
 export OMARCHY_TEST_AGENT_TERMINAL_LOG="$terminal_log"
 export OMARCHY_TEST_AGENT_MENU_LOG="$menu_log"
+export OMARCHY_TEST_CURL_LOG="$curl_log"
 export OMARCHY_PATH="$ROOT"
 
 grok_package="npm:@xai-official/grok"
@@ -380,6 +397,70 @@ mapfile -d '' -t agent_open_args <"$agent_open_log"
   fail "installed agent opens in a new terminal after selection"
 pass "installed agents select and open without notifications"
 
+# prime-agent has no mise package: it installs through its own curl bootstrap,
+# so it exercises omarchy-cmd-missing and curl instead of mise where/use.
+: >"$notification_history"
+: >"$agent_open_log"
+: >"$terminal_log"
+: >"$curl_log"
+export OMARCHY_TEST_MISSING_COMMAND=prime-agent
+omarchy-default-agent prime-agent
+unset OMARCHY_TEST_MISSING_COMMAND
+mapfile -d '' -t terminal_args <"$terminal_log"
+[[ ${terminal_args[0]} == "omarchy-default-agent" && ${terminal_args[1]} == "--install" && ${terminal_args[2]} == "prime-agent" ]] ||
+  fail "missing prime-agent opens its install in a terminal"
+[[ ! -s $curl_log ]] || fail "selecting a missing prime-agent waits to run the curl installer"
+[[ ! -s $agent_open_log ]] || fail "missing prime-agent installation waits to open the agent"
+pass "prime-agent is not installed through mise, so selecting it without the binary opens a terminal to install it"
+
+: >"$curl_log"
+: >"$agent_open_log"
+: >"$mise_log"
+export OMARCHY_TEST_MISSING_COMMAND=prime-agent
+omarchy-default-agent --install prime-agent >"$test_tmp/prime-agent-install-output"
+unset OMARCHY_TEST_MISSING_COMMAND
+mapfile -d '' -t curl_args <"$curl_log"
+[[ ${curl_args[*]} == "-fsSL https://app.primeintellect.ai/prime-agent/install.sh" ]] ||
+  fail "prime-agent installs through its documented curl bootstrap"
+[[ ! -s $mise_log ]] || fail "prime-agent installation never calls mise"
+[[ $(omarchy-default-agent) == "prime-agent" ]] || fail "prime-agent installation selects it as the default agent"
+mapfile -d '' -t agent_open_args <"$agent_open_log"
+[[ ${#agent_open_args[@]} == 2 && ${agent_open_args[0]} == "omarchy-agent" && ${agent_open_args[1]} == "--inline" ]] ||
+  fail "newly curl-installed prime-agent opens in the installation terminal"
+pass "prime-agent installs through curl instead of mise"
+
+# Once installed, reselecting prime-agent must not re-run its installer: unlike
+# mise's own idempotent "use -g", the curl bootstrap always re-downloads, so a
+# second install would mean a network round trip on every reselection.
+: >"$curl_log"
+: >"$agent_open_log"
+: >"$mise_log"
+omarchy-default-agent prime-agent
+[[ ! -s $curl_log ]] || fail "reselecting an already-installed prime-agent re-runs the curl installer"
+[[ ! -s $mise_log ]] || fail "prime-agent selection never calls mise"
+mapfile -d '' -t agent_open_args <"$agent_open_log"
+[[ ${#agent_open_args[@]} == 1 && ${agent_open_args[0]} == "omarchy-agent" ]] ||
+  fail "an already-installed prime-agent still opens after reselection"
+pass "reselecting an installed prime-agent skips the curl installer"
+
+: >"$notification_history"
+: >"$agent_open_log"
+: >"$curl_log"
+if OMARCHY_TEST_MISSING_COMMAND=prime-agent OMARCHY_TEST_CURL_FAIL=true omarchy-default-agent --install prime-agent >"$test_tmp/prime-agent-install-failure-output" 2>&1; then
+  fail "default agent rejects a failed prime-agent curl installation"
+fi
+[[ $(omarchy-default-agent) == "prime-agent" ]] || fail "a failed reinstall preserves the current default agent"
+grep -F "Could not install Prime Agent" "$test_tmp/prime-agent-install-failure-output" >/dev/null ||
+  fail "default agent reports a failed prime-agent installation without blaming mise"
+[[ ! -s $notification_history ]] || fail "failed prime-agent installation skips notifications"
+[[ ! -s $agent_open_log ]] || fail "failed prime-agent installation does not open an agent"
+pass "default agent reports a failed prime-agent installation distinctly from a failed mise one"
+
+# Restore the default agent to what it was before this block, so the
+# assertions that follow (inherited from before prime-agent existed) see the
+# same starting state they expect.
+OMARCHY_TEST_AGENT_INSTALLED=true omarchy-default-agent copilot >/dev/null
+
 : >"$agent_open_log"
 if omarchy-default-agent unsupported >"$test_tmp/invalid-output" 2>&1; then
   fail "default agent rejects unsupported providers"
@@ -464,6 +545,7 @@ assert_launch crush crush run "Review this project"
 assert_launch grok grok --permission-mode bypassPermissions -- "Review this project"
 assert_launch agy agy --dangerously-skip-permissions --prompt-interactive "Review this project"
 assert_launch copilot copilot --allow-all --interactive "Review this project"
+assert_launch prime-agent prime-agent "Review this project"
 pass "agent launcher adapts initial prompts for every supported agent"
 
 assert_bypass pi pi
@@ -476,6 +558,7 @@ assert_bypass crush crush --yolo
 assert_bypass grok grok --permission-mode bypassPermissions
 assert_bypass agy agy --dangerously-skip-permissions
 assert_bypass copilot copilot --allow-all
+assert_bypass prime-agent prime-agent
 pass "agent launcher skips permission prompts for every supported agent"
 
 printf '%s\n' "opencode" >"$agent_file"

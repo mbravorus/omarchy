@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # omarchy:summary=Set and launch the default coding agent
-# omarchy:args=[pi|omp|opencode|ori|claude|codex|grok|agy|copilot|crush]
+# omarchy:args=[pi|omp|opencode|ori|claude|codex|grok|agy|copilot|crush|prime-agent]
 # omarchy:examples=omarchy default agent | omarchy default agent codex | omarchy default agent claude
 
 installing=false
@@ -23,6 +23,11 @@ if (($# == 0)); then
   exit 0
 fi
 
+# Most agents install and activate through mise. prime-agent ships its own
+# curl installer instead (no public npm registry entry for mise to resolve
+# against), so it takes the "curl" installer path set in its own case below.
+installer=mise
+
 case "$1" in
 pi) agent="pi"; name="Pi" ;;
 omp | oh-my-pi) agent="omp"; name="Oh My Pi"; agent_package="github:can1357/oh-my-pi" ;;
@@ -34,21 +39,46 @@ crush) agent="crush"; name="Crush" ;;
 grok) agent="grok"; name="Grok"; agent_package="npm:@xai-official/grok" ;;
 agy | antigravity | antigravity-cli | gemini | gemini-cli) agent="agy"; name="Antigravity"; agent_package="antigravity-cli" ;;
 copilot | github-copilot) agent="copilot"; name="GitHub Copilot" ;;
+prime-agent | prime | pa) agent="prime-agent"; name="Prime Agent"; installer="curl" ;;
 *)
-  echo "Usage: omarchy-default-agent <pi|omp|opencode|ori|claude|codex|grok|agy|copilot|crush>"
+  echo "Usage: omarchy-default-agent <pi|omp|opencode|ori|claude|codex|grok|agy|copilot|crush|prime-agent>"
   exit 1
   ;;
 esac
 
 agent_package=${agent_package:-$agent}
 
-if [[ $installing == "false" ]] && ! mise where "$agent_package" &>/dev/null; then
+is_installed() {
+  case "$installer" in
+  mise) mise where "$agent_package" &>/dev/null ;;
+  curl) ! omarchy-cmd-missing "$agent" ;;
+  esac
+}
+
+# mise's own "use -g" is already a fast, idempotent no-op once installed, so it
+# activates unconditionally on every call. The curl installer has no such
+# built-in idempotency of its own -- it always re-downloads and reinstalls --
+# so it short-circuits on an existing install here instead.
+do_install() {
+  case "$installer" in
+  mise) mise use -g "$agent_package" ;;
+  curl)
+    is_installed && return 0
+    curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+    ;;
+  esac
+}
+
+if [[ $installing == "false" ]] && ! is_installed; then
   exec omarchy-launch-floating-terminal-with-presentation omarchy-default-agent --install "$agent"
 fi
 
-if ! mise use -g "$agent_package"; then
+if ! do_install; then
   if [[ $installing == "true" ]]; then
-    echo "Could not install $name with mise" >&2
+    case "$installer" in
+    mise) echo "Could not install $name with mise" >&2 ;;
+    curl) echo "Could not install $name" >&2 ;;
+    esac
   else
     echo "Could not set $name as the default coding agent" >&2
   fi

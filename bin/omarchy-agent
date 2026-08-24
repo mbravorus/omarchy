@@ -101,6 +101,13 @@ pi)
   command=(pi)
   [[ -n ${prompt:-} ]] && command+=("$prompt")
   ;;
+prime-agent)
+  # Like pi, there are no approval prompts to bypass. --autonomous is for
+  # headless runs: with a user present it would keep working past the first
+  # turn.
+  command=(prime-agent)
+  [[ -n ${prompt:-} ]] && command+=("$prompt")
+  ;;
 *)
   echo "Unsupported default agent: $agent" >&2
   exit 1
