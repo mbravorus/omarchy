@@ -1,0 +1,11 @@
+#!/bin/bash
+
+# omarchy:summary=Update Prime Agent
+
+# Prime Agent installs through its own curl bootstrap rather than mise (no
+# public npm registry entry for mise to resolve against), so it needs its own
+# update step alongside omarchy-update-mise instead of being swept by it.
+if omarchy-cmd-present prime-agent; then
+  echo -e "\e[32m\nUpdate Prime Agent\e[0m"
+  prime-agent update
+fi
